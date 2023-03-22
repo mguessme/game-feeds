@@ -1,19 +1,22 @@
-// import { MongoClient } from 'mongodb'
-const { MongoClient } = require('mongodb');
+import { MongoClient } from "mongodb";
+import { dbString } from "./config.js";
 
 let dbConnection;
 
-module.exports = {
-    connectDb: (callback) => {
-        MongoClient.connect('mongodb://localhost:27017/scoreboard')
-            .then((client) => {
-                dbConnection = client.db()
-                return callback()
-            })
-            .catch(error => {
-                console.error(error)
-                return callback(error)
-            })
-    },
-    getDb: () => dbConnection
-}
+const connectDb = (callback) => {
+  MongoClient.connect(dbString)
+    .then((client) => {
+      dbConnection = client.db();
+      return callback();
+    })
+    .catch((error) => {
+      console.error(error);
+      return callback(error);
+    });
+};
+
+const getDb = () => {
+  return dbConnection;
+};
+
+export { connectDb, getDb };

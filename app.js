@@ -1,33 +1,48 @@
-const http = require('http');
-// import http from 'http'
-const { connectDb, getDb } = require('./db');
+import { createServer } from "http";
+import { parse } from "url";
+import { hostname, port, allowedOrigin, nbaFeed, mlbFeed } from "./config.js";
+import { connectDb, getDb } from "./db.js";
+let feeds = { MLB: mlbFeed, NBA: nbaFeed };
 
-// Database connection
+// Set up database connection
 let db;
 connectDb((error) => {
   if (!error) {
     db = getDb();
-    //TODO - Start Server...
+    initServer();
   }
-})
-
-const hostname = '127.0.0.1';
-const port = 3001;
-let lastFetch = 0;
-
-const server = http.createServer((req, res) => {
-
-  let gameData = {};
-  const now = Date.now();
-
-  // If it has been 15 seconds since the last data fetch, refresh the data from the API
-  if (lastFetch + 15000 <= now) getFreshData(res);
-  else getCachedData(res);
-
 });
 
-function getFreshData(res) {
-  const url = "https://chumley.barstoolsports.com/dev/data/games/eed38457-db28-4658-ae4f-4d4d38e9e212.json";
+// Initialize the server
+const initServer = () => {
+  const server = createServer((req, res) => {
+    const reqUrl = parse(req.url).pathname;
+    let league;
+
+    // When a request arrives, first check which league was requested based on the URL
+    // Switch statement extensible if additional URLs are added
+    switch (reqUrl) {
+      case "/mlb":
+        league = "MLB";
+        break;
+      case "/nba":
+        league = "NBA";
+        break;
+      default:
+        league = "MLB";
+    }
+
+    // Check the database for game data
+    getCachedData(res, league);
+  });
+
+  server.listen(port, hostname, () => {
+    console.log(`Server running at http://${hostname}:${port}/`);
+  });
+};
+
+// Get fresh data from live game data feed, store/refresh it in the database, and return the data
+const getFreshData = (res, league) => {
   const options = {
     method: "GET",
     headers: {
@@ -35,32 +50,75 @@ function getFreshData(res) {
       "Content-Type": "application/json;charset=UTF-8",
     },
   };
-  fetch(url, options)
+  const feedUrl = feeds[league];
+  fetch(feedUrl, options)
     .then((response) => response.json())
     .then((data) => {
       let gameData = data;
-      gameData.fetched = lastFetch = Date.now();
-
-      db.collection('games').replaceOne({league: "MLB"}, gameData)
-      .then((result) => {
-        res.statusCode = 200;
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify(gameData));
-      })
+      gameData.fetched = Date.now(); // Add a timestamp to the data, which we can check upon subsequent requests
+      // Check if there's already a record in the database
+      db.collection("games")
+        .count({ league: league })
+        .then((result) => {
+          if (result) {
+            // Document already exists, update it
+            db.collection("games")
+              .replaceOne({ league: league }, gameData)
+              .then((result) => returnGameData(res, gameData))
+              .catch((error) => {
+                console.error(error);
+                returnGameData(res, gameData);
+              });
+          } else {
+            // Document does not exist, create one
+            db.collection("games")
+              .insertOne(gameData)
+              .then((result) => returnGameData(res, gameData))
+              .catch((error) => {
+                console.error(error);
+                returnGameData(res, gameData);
+              });
+          }
+        })
+        .catch((error) => {
+          console.error(error);
+          returnGameData(res, gameData);
+        });
     })
-}
+    .catch((error) => {
+      console.error(error);
+      returnError(res, "Could not fetch game data.");
+    });
+};
 
-function getCachedData(res) {
-  db.collection('games').findOne({league: "MLB"})
-  .then(game => {
-    res.statusCode = 200;
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify(game));
-  })
-}
+// Get cached data from database and check the timestamp
+const getCachedData = (res, league) => {
+  const now = Date.now();
+  db.collection("games")
+    .findOne({ league: league })
+    .then((game) => {
+      if (game.fetched > now - 15000)
+        returnGameData(res, game); // Return the saved data if within 15 seconds
+      else getFreshData(res, league); // Otherwise, fetch new data
+    })
+    .catch((error) => {
+      console.error(error);
+      returnError(res, "Could not load game data.");
+    });
+};
 
-server.listen(port, hostname, () => {
-  console.log(`Server running at http://${hostname}:${port}/`);
-});
+// Return the response
+const returnGameData = (res, data) => {
+  res.statusCode = 200;
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(data));
+};
+
+// Return an error message
+const returnError = (res, error) => {
+  res.statusCode = 500;
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify({ error: error }));
+};
